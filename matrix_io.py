@@ -39,24 +39,36 @@ class SparseRow(object):
     def __init__(self, header, defaults, numbers=None, coo=[], copy=True):
         self._header, self._defaults, self._numbers = \
             _get_header(header, defaults, numbers, copy)
-        self._fix_set = set()
-        self._duplicates = False
+        self._values = {}
 
-        def check(fix, v):
+        def add(fix, v):
             fix = int(fix)
             self._check_range(fix)
-            if fix in self._fix_set:
-                self._duplicates = True
-            self._fix_set.add(fix)
             v = self._convert(fix, v)
-            return (fix, v)
+            if not self._is_default(fix, v):
+                self._values[fix] = v
 
-        self._row = [
-            check(fix, v)
-            for (fix, v) in coo
-            if not self._is_default(int(fix), self._convert(int(fix), v))
-        ]
-        self._dense = None
+        for (fix, v) in coo:
+            add(fix, v)
+
+    def __iter__(self):
+        row = self
+
+        class RowIter(object):
+            def __init__(self):
+                self.ix = 0
+
+            def __iter__(self):
+                return self
+
+            def __next__(self):
+                if self.ix >= len(row._defaults):
+                    raise StopIteration
+                res = row._get(self.ix)
+                self.ix += 1
+                return res
+
+        return RowIter()
 
     def _convert(self, fix, v):
         return np.float64(v) if self._numbers[fix] else v
@@ -73,15 +85,8 @@ class SparseRow(object):
             return np.isnan(v) and np.isnan(default)
         return False
 
-    def remove_duplicates(self):
-        if self._duplicates:
-            self._get_row()
-            self._from_dense()
-
     def get_values(self):
-        self.remove_duplicates()
-        for e in self._row:
-            yield e
+        return self._values.items()
 
     def get_name(self, fix):
         return self._header[fix]
@@ -89,68 +94,47 @@ class SparseRow(object):
     def is_num(self, fix):
         return self._numbers[fix]
 
-    def _from_dense(self):
-        self._duplicates = False
-        self._row = []
-        self._fix_set = set()
-        for (fix, v) in enumerate(self._dense):
-            if not self._is_default(fix, v):
-                self._row.append((fix, v))
-                self._fix_set.add(fix)
-
     def from_dense(self, row):
-        dense = [ self._convert(fix, v) for (fix, v) in enumerate(row) ]
-        if len(dense) != len(self._defaults):
-            raise ValueError("header")
-        self._dense = dense
-        self._from_dense()
+        self._values = {}
+        last_fix = 0
+        for (fix, v) in enumerate(row):
+            v = self._convert(fix, v)
+            if not self._is_default(fix, v):
+                self._values[fix] = v
+            last_fix = fix
+        self._check_range(last_fix)
 
-    def _get_row(self):
-        if self._dense is None:
-            dense = list(self._defaults)
-            for (fix, v) in self._row:
-                dense[fix] = v
-            self._dense = dense
-        return self._dense
-
-    def get_row(self):
-        return list(self._get_row())
+    def _get(self, fix):
+        try:
+            return self._values[fix]
+        except KeyError:
+            return self._defaults[fix]
 
     def __getitem__(self, fix):
-        fix = int(fix)
-        self._check_range(fix)
-        return self._get_row()[fix]
+        return self._get(int(fix))
 
     def __setitem__(self, fix, v):
         fix = int(fix)
         self._check_range(fix)
         v = self._convert(fix, v)
-        if fix in self._fix_set:
-            self._duplicates = True
-        elif self._is_default(fix, v):
+        if self._is_default(fix, v):
+            try:
+                del self._values[fix]
+            except KeyError:
+                pass
             return
-        self._fix_set.add(fix)
-        self._row.append((fix, v))
-        if self._dense is not None:
-            self._dense[fix] = v
+        self._values[fix] = v
 
     def __delitem__(self, fix):
         fix = int(fix)
         self._check_range(fix)
-        if fix not in self._fix_set:
-            return
-        self._duplicates = True
-        self._fix_set.add(fix)
-        v = self._defaults[fix]
-        self._row.append((fix, v))
-        if self._dense is not None:
-            self._dense[fix] = v
+        try:
+            del self._values[fix]
+        except KeyError:
+            pass
 
     def clear(self):
-        self._row = []
-        self._dense = None
-        self._fix_set = set()
-        self._duplicates = False
+        self._values = {}
 
 
 class BaseFile(object):
