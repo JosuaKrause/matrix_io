@@ -201,8 +201,11 @@ class SparseWriter(BaseFile):
             self.close()
             raise
 
+    def get_empty_row(self):
+        return SparseRow(self._header, self._defaults, self._numbers, copy=False)
+
     def write_dense_row(self, values):
-        row = SparseRow(self._header, self._defaults, self._numbers, copy=False)
+        row = self.get_empty_row()
         row.from_dense(values)
         self.write_sparse_row(row.get_values())
 
