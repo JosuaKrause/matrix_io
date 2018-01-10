@@ -16,40 +16,72 @@ def _is_num(v):
         return False
 
 
-def _get_header(header, defaults, numbers, copy):
+def _get_numbers(defaults):
+    return [ _is_num(d) for d in defaults ]
+
+
+def _get_defaults(defaults, numbers):
+    return [
+        np.float64(d) if numbers[fix] else d
+        for (fix, d) in enumerate(defaults)
+    ]
+
+
+def _get_converts(defaults, numbers):
+
+    def get(fix):
+        default = defaults[fix]
+
+        def num(v):
+            v = np.float64(v)
+            is_d = v == default or (np.isnan(v) and np.isnan(default))
+            return v, is_d
+
+        def obj(v):
+            return v, v == default
+
+        return num if numbers[fix] else obj
+
+    return [ get(fix) for fix in range(len(defaults)) ]
+
+
+def _get_header(header, defaults, numbers, converts, copy):
     if copy:
         header = list(header)
     if numbers is None:
-        numbers = [ _is_num(d) for d in defaults ]
+        numbers = _get_numbers(defaults)
     elif copy:
         numbers = list(numbers)
     if len(header) != len(numbers):
         raise ValueError("header size != numbers size")
     if copy:
-        defaults = [
-            np.float64(d) if numbers[fix] else d
-            for (fix, d) in enumerate(defaults)
-        ]
+        defaults = _get_defaults(defaults, numbers)
     if len(header) != len(defaults):
         raise ValueError("header size != defaults size")
-    return header, defaults, numbers
+    if converts is None:
+        converts = _get_converts(defaults, numbers)
+    elif copy:
+        converts = list(converts)
+    if len(header) != len(converts):
+        raise ValueError("header size != converts size")
+    return header, defaults, numbers, converts
 
 
 class SparseRow(object):
-    def __init__(self, header, defaults, numbers=None, coo=[], copy=True):
-        self._header, self._defaults, self._numbers = \
-            _get_header(header, defaults, numbers, copy)
-        self._values = {}
-
-        def add(fix, v):
-            fix = int(fix)
-            self._check_range(fix)
-            v, is_d = self._convert(fix, v)
-            if not is_d:
-                self._values[fix] = v
-
-        for (fix, v) in coo:
-            add(fix, v)
+    def __init__(self, header, defaults, numbers=None, converts=None,
+            coo=[], copy=True, init={}, _shallow_copy=None):
+        if _shallow_copy is not None:
+            self._header = _shallow_copy._header
+            self._defaults = _shallow_copy._defaults
+            self._numbers = _shallow_copy._numbers
+            self._converts = _shallow_copy._converts
+            self._init = _shallow_copy._init
+            self._values = _shallow_copy._values
+            return
+        self._header, self._defaults, self._numbers, self._converts = \
+            _get_header(header, defaults, numbers, converts, copy)
+        self._init = init.copy() if copy else init
+        self.from_coo(coo) # initializes _values
 
     def __iter__(self):
         row = self
@@ -70,14 +102,6 @@ class SparseRow(object):
 
         return RowIter()
 
-    def _convert(self, fix, v):
-        default = self._defaults[fix]
-        if self._numbers[fix]:
-            v = np.float64(v)
-            is_d = v == default or (np.isnan(v) and np.isnan(default))
-            return v, is_d
-        return v, v == default
-
     def _check_range(self, fix):
         if fix < 0 or fix >= len(self._defaults):
             raise IndexError("index out of bounds: {0}".format(fix))
@@ -91,11 +115,20 @@ class SparseRow(object):
     def is_num(self, fix):
         return self._numbers[fix]
 
+    def from_coo(self, coo):
+        self._values = self._init.copy()
+        for (fix, v) in coo:
+            fix = int(fix)
+            self._check_range(fix)
+            v, is_d = self._converts[fix](v)
+            if not is_d:
+                self._values[fix] = v
+
     def from_dense(self, row):
-        self._values = {}
+        self._values = self._init.copy()
         last_fix = 0
         for (fix, v) in enumerate(row):
-            v, is_d = self._convert(fix, v)
+            v, is_d = self._converts[fix](v)
             if not is_d:
                 self._values[fix] = v
             last_fix = fix
@@ -113,7 +146,7 @@ class SparseRow(object):
     def __setitem__(self, fix, v):
         fix = int(fix)
         self._check_range(fix)
-        v, is_d = self._convert(fix, v)
+        v, is_d = self._converts[fix](v)
         if is_d:
             try:
                 del self._values[fix]
@@ -131,7 +164,7 @@ class SparseRow(object):
             pass
 
     def clear(self):
-        self._values = {}
+        self._values = self._init.copy()
 
 
 class BaseFile(object):
@@ -187,11 +220,11 @@ class BaseFile(object):
 
 
 class SparseWriter(BaseFile):
-    def __init__(self, fn, header, defaults, numbers=None, copy=True, is_zip=True):
+    def __init__(self, fn, header, defaults, numbers=None, converts=None, copy=True, is_zip=True):
         BaseFile.__init__(self, fn, True, is_zip)
         try:
-            self._header, self._defaults, self._numbers = \
-                _get_header(header, defaults, numbers, copy)
+            self._header, self._defaults, self._numbers, self._converts = \
+                _get_header(header, defaults, numbers, converts, copy)
             self._csv.writerow(self._header)
             self._csv.writerow(self._defaults)
         except:
@@ -199,7 +232,7 @@ class SparseWriter(BaseFile):
             raise
 
     def get_empty_row(self):
-        return SparseRow(self._header, self._defaults, self._numbers, copy=False)
+        return SparseRow(self._header, self._defaults, self._numbers, self._converts, copy=False)
 
     def write_dense_row(self, values):
         row = self.get_empty_row()
@@ -211,16 +244,33 @@ class SparseWriter(BaseFile):
 
 
 class SparseLoader(BaseFile):
-    def __init__(self, fn, header=None, defaults=None,
-            numbers=None, copy=True, is_zip=True):
+    def __init__(self, fn, header=None, defaults=None, numbers=None,
+            converts=None, copy=True, is_zip=True, map_defaults=None, overwrite_row=False):
         BaseFile.__init__(self, fn, False, is_zip)
         try:
+            self._overwrite_row = overwrite_row
             if header is None:
-                self._header = next(self._csv)
+                header = next(self._csv)
             if defaults is None:
                 defaults = next(self._csv)
-            self._header, self._defaults, self._numbers = \
-                _get_header(header, defaults, numbers, copy)
+                if numbers is None:
+                    numbers = _get_numbers(defaults)
+                defaults = _get_defaults(defaults, numbers)
+            init = {}
+            if map_defaults is not None:
+
+                def do_map(fix, d):
+                    new_d = map_defaults(fix, d)
+                    if d is not new_d:
+                        init[fix] = d
+                    return new_d
+
+                defaults = [ do_map(fix, d) for (fix, d) in enumerate(defaults) ]
+            self._header, self._defaults, self._numbers, self._converts = \
+                _get_header(header, defaults, numbers, converts, copy)
+            self._init = init
+            self._row = SparseRow(self._header, self._defaults,
+                self._numbers, self._converts, copy=False, init=self._init)
         except:
             self.close()
             raise
@@ -235,5 +285,9 @@ class SparseLoader(BaseFile):
         return self
 
     def __next__(self):
-        return SparseRow(self._header, self._defaults, self._numbers,
-            (e.split(':', 1) for e in next(self._csv)), copy=False)
+        if self._overwrite_row:
+            row = self._row
+        else:
+            row = SparseRow(None, None, _shallow_copy=self._row)
+        row.from_coo(e.split(':', 1) for e in next(self._csv))
+        return row
