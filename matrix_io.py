@@ -44,8 +44,8 @@ class SparseRow(object):
         def add(fix, v):
             fix = int(fix)
             self._check_range(fix)
-            v = self._convert(fix, v)
-            if not self._is_default(fix, v):
+            v, is_d = self._convert(fix, v)
+            if not is_d:
                 self._values[fix] = v
 
         for (fix, v) in coo:
@@ -71,19 +71,16 @@ class SparseRow(object):
         return RowIter()
 
     def _convert(self, fix, v):
-        return np.float64(v) if self._numbers[fix] else v
+        default = self._defaults[fix]
+        if self._numbers[fix]:
+            v = np.float64(v)
+            is_d = v == default or (np.isnan(v) and np.isnan(default))
+            return v, is_d
+        return v, v == default
 
     def _check_range(self, fix):
         if fix < 0 or fix >= len(self._defaults):
             raise IndexError("index out of bounds: {0}".format(fix))
-
-    def _is_default(self, fix, v):
-        default = self._defaults[fix]
-        if v == default:
-            return True
-        if self._numbers[fix]:
-            return np.isnan(v) and np.isnan(default)
-        return False
 
     def get_values(self):
         return self._values.items()
@@ -98,8 +95,8 @@ class SparseRow(object):
         self._values = {}
         last_fix = 0
         for (fix, v) in enumerate(row):
-            v = self._convert(fix, v)
-            if not self._is_default(fix, v):
+            v, is_d = self._convert(fix, v)
+            if not is_d:
                 self._values[fix] = v
             last_fix = fix
         self._check_range(last_fix)
@@ -116,8 +113,8 @@ class SparseRow(object):
     def __setitem__(self, fix, v):
         fix = int(fix)
         self._check_range(fix)
-        v = self._convert(fix, v)
-        if self._is_default(fix, v):
+        v, is_d = self._convert(fix, v)
+        if is_d:
             try:
                 del self._values[fix]
             except KeyError:
