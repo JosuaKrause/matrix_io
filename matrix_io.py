@@ -116,13 +116,17 @@ class SparseRow(object):
         return self._numbers[fix]
 
     def from_coo(self, coo):
+
+        def coo_iter():
+            for (fix, v) in coo:
+                fix = int(fix)
+                self._check_range(fix)
+                v, is_d = self._converts[fix](v)
+                if not is_d:
+                    yield (fix, v)
+
         self._values = self._init.copy()
-        for (fix, v) in coo:
-            fix = int(fix)
-            self._check_range(fix)
-            v, is_d = self._converts[fix](v)
-            if not is_d:
-                self._values[fix] = v
+        self._values.update(coo_iter())
 
     def from_dense(self, row):
         self._values = self._init.copy()
